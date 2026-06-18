@@ -4,6 +4,8 @@ import com.veritasdb.storage.LsmEngine;
 import com.veritasdb.txn.MvccStore;
 import com.veritasdb.txn.Transaction;
 import com.veritasdb.txn.TransactionManager;
+import com.veritasdb.raft.RaftCluster;
+import com.veritasdb.raft.RaftNode;
 
 import java.nio.file.Path;
 
@@ -11,6 +13,11 @@ public class Main {
     public static void main(String[] args) throws Exception {
         if (args.length >= 1 && args[0].equalsIgnoreCase("txn")) {
             runTxnDemo();
+            return;
+        }
+
+        if (args.length >= 1 && args[0].equalsIgnoreCase("raft")) {
+            runRaftDemo();
             return;
         }
 
@@ -68,5 +75,28 @@ public class Main {
         tm.put(t2, "balance", "400");
         System.out.println("t1 commit: " + (tm.commit(t1) ? "SUCCESS" : "ABORT"));
         System.out.println("t2 commit: " + (tm.commit(t2) ? "SUCCESS" : "ABORT (conflict)"));
+    }
+
+    private static void runRaftDemo() {
+        com.veritasdb.raft.RaftCluster cluster = new com.veritasdb.raft.RaftCluster(3);
+        System.out.println("=== Raft Demo (3 nodes) ===\n");
+
+        System.out.println("Node 0 starts an election...");
+        cluster.node(0).startElection();
+        System.out.println("Leader is now node " + cluster.leader().id()
+                + " (term " + cluster.leader().currentTerm() + ")\n");
+
+        System.out.println("Leader replicates 'PUT x 1'...");
+        boolean ok = cluster.leader().replicate("PUT x 1");
+        System.out.println("Committed to majority: " + ok);
+        System.out.println("Followers' log sizes: node1=" + cluster.node(1).logSize()
+                + ", node2=" + cluster.node(2).logSize() + "\n");
+
+        System.out.println("Leader (node 0) fails...");
+        cluster.kill(0);
+        System.out.println("Node 1 starts an election...");
+        cluster.node(1).startElection();
+        System.out.println("New leader is node " + cluster.leader().id()
+                + " (term " + cluster.leader().currentTerm() + ")");
     }
 }
