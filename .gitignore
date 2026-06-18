@@ -1,0 +1,8 @@
+.gradle/
+build/
+*.class
+.DS_Store
+.vscode/
+data/*.db
+data/*.wal
+data/*.sst
