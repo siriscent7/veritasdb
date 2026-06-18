@@ -1,7 +1,5 @@
 package com.veritasdb;
-
 import com.veritasdb.storage.LsmEngine;
-
 import java.nio.file.Path;
 
 public class Main {
@@ -9,7 +7,8 @@ public class Main {
         Path dataDir = Path.of("data");
 
         try (LsmEngine engine = new LsmEngine(dataDir)) {
-            System.out.println("Recovered " + engine.size() + " keys from WAL.");
+            System.out.println("Recovered: memtable=" + engine.memtableSize()
+                    + " keys, SSTables=" + engine.ssTableCount());
 
             if (args.length >= 3 && args[0].equalsIgnoreCase("put")) {
                 engine.put(args[1], args[2]);
