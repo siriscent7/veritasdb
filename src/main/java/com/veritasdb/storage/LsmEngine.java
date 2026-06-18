@@ -1,5 +1,4 @@
 package com.veritasdb.storage;
-
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -8,13 +7,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-/**
- * LSM engine: memtable + WAL + immutable SSTables.
- *   - Writes go to WAL (durability) then the memtable.
- *   - When the memtable exceeds a threshold, it is flushed to an SSTable
- *     and the WAL is truncated.
- *   - Reads check the memtable first, then SSTables newest -> oldest.
- */
 public final class LsmEngine implements AutoCloseable {
 
     private static final int FLUSH_THRESHOLD = 3; // small, so demos trigger flushes
@@ -103,5 +95,29 @@ public final class LsmEngine implements AutoCloseable {
 
     @Override public void close() throws IOException {
         wal.close();
+    }
+
+    public void compact() throws IOException {
+        if (ssTables.size() <= 1) return;
+
+        java.util.NavigableMap<String, ValueEntry> merged = new java.util.TreeMap<>();
+        // apply oldest -> newest so newer values overwrite
+        for (SSTable t : ssTables) {
+            for (var e : t.load().entrySet()) {
+                merged.put(e.getKey(), e.getValue());
+            }
+        }
+        // drop tombstones in the final compacted view
+        merged.values().removeIf(ValueEntry::tombstone);
+
+        // delete old SSTable files
+        for (SSTable t : ssTables) {
+            java.nio.file.Files.deleteIfExists(t.path());
+        }
+        ssTables.clear();
+
+        // write one compacted table
+        Path ssPath = dataDir.resolve(String.format("sstable-%05d.sst", ssTableCounter++));
+        ssTables.add(SSTable.write(ssPath, merged));
     }
 }
