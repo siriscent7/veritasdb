@@ -139,6 +139,9 @@ public class Main {
         RaftNode node = new RaftNode(id, peers, transport, persistence);
         RaftGrpcServer server = new RaftGrpcServer(port, node);
         server.start();
+        node.startTicker();   // auto elections + heartbeats
+        System.out.println("Ticker started (auto-election enabled).");
+
 
         BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         System.out.println("Commands: elect | put <k> <v> | status | quit");
@@ -159,7 +162,7 @@ public class Main {
                 case "status" -> System.out.println("id=" + node.id() + " state=" + node.state()
                         + " term=" + node.currentTerm() + " leader=" + node.currentLeader()
                         + " log=" + node.logSize());
-                case "quit" -> { server.stop(); return; }
+                case "quit" -> { node.stopTicker(); server.stop(); return; }
                 default -> System.out.println("Unknown: " + line);
             }
         }
