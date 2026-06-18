@@ -1,14 +1,16 @@
 package com.veritasdb.raft;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A single Raft node implementing leader election and log replication.
+ * A single Raft node implementing leader election and log replication,
+ * with optional durable persistence of term, votedFor, and the log.
  *
- * This is transport-agnostic: a RaftCluster (or, later, a network layer)
- * delivers RPCs by calling handleRequestVote / handleAppendEntries, and
- * sends out RPCs via the RaftTransport interface.
+ * Transport-agnostic: RPCs are delivered via handleRequestVote /
+ * handleAppendEntries, and sent out via the Transport interface.
  */
 public final class RaftNode {
 
@@ -18,8 +20,9 @@ public final class RaftNode {
     }
 
     private final int id;
-    private final int[] peers;          // other node ids
+    private final int[] peers;
     private final Transport transport;
+    private final RaftPersistence persistence; // may be null (in-memory)
 
     // --- persistent state ---
     private long currentTerm = 0;
@@ -32,11 +35,42 @@ public final class RaftNode {
     private Integer currentLeader = null;
 
     public RaftNode(int id, int[] peers, Transport transport) {
+        this(id, peers, transport, null);
+    }
+
+    public RaftNode(int id, int[] peers, Transport transport, RaftPersistence persistence) {
         this.id = id;
         this.peers = peers;
         this.transport = transport;
+        this.persistence = persistence;
+        loadPersistentState();
     }
 
+    private void loadPersistentState() {
+        if (persistence == null) return;
+        try {
+            long[] meta = persistence.loadMeta();
+            currentTerm = meta[0];
+            votedFor = (meta[1] == -1) ? null : (int) meta[1];
+            log.addAll(persistence.loadLog());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to load Raft state", e);
+        }
+    }
+
+    private void persistMeta() {
+        if (persistence == null) return;
+        try { persistence.saveMeta(currentTerm, votedFor); }
+        catch (IOException e) { throw new UncheckedIOException("persist meta failed", e); }
+    }
+
+    private void persistLog() {
+        if (persistence == null) return;
+        try { persistence.saveLog(log); }
+        catch (IOException e) { throw new UncheckedIOException("persist log failed", e); }
+    }
+
+    // --- accessors ---
     public synchronized int id() { return id; }
     public synchronized RaftState state() { return state; }
     public synchronized long currentTerm() { return currentTerm; }
@@ -51,15 +85,15 @@ public final class RaftNode {
 
     // ---------------- Leader Election ----------------
 
-    /** Called when the election timeout fires: become candidate and request votes. */
     public synchronized void startElection() {
         state = RaftState.CANDIDATE;
         currentTerm++;
         votedFor = id;
         currentLeader = null;
+        persistMeta();
 
         long termForElection = currentTerm;
-        int votes = 1; // vote for self
+        int votes = 1;
 
         int lastIndex = log.size() - 1;
         long lastTerm = lastIndex >= 0 ? log.get(lastIndex).term() : 0;
@@ -69,15 +103,10 @@ public final class RaftNode {
                 new Messages.RequestVote(termForElection, id, lastIndex, lastTerm);
             Messages.VoteResponse resp = transport.sendRequestVote(peer, rpc);
             if (resp == null) continue;
-
-            if (resp.term() > currentTerm) {
-                stepDown(resp.term());
-                return;
-            }
+            if (resp.term() > currentTerm) { stepDown(resp.term()); return; }
             if (resp.voteGranted()) votes++;
         }
 
-        // majority?
         if (state == RaftState.CANDIDATE && votes > (peers.length + 1) / 2) {
             becomeLeader();
         }
@@ -86,11 +115,9 @@ public final class RaftNode {
     private void becomeLeader() {
         state = RaftState.LEADER;
         currentLeader = id;
-        // send initial heartbeats
         sendHeartbeats();
     }
 
-    /** RPC handler: another node is requesting our vote. */
     public synchronized Messages.VoteResponse handleRequestVote(Messages.RequestVote rpc) {
         if (rpc.term() > currentTerm) stepDown(rpc.term());
 
@@ -100,6 +127,7 @@ public final class RaftNode {
                 && isCandidateLogUpToDate(rpc.lastLogIndex(), rpc.lastLogTerm())) {
             grant = true;
             votedFor = rpc.candidateId();
+            persistMeta();
         }
         return new Messages.VoteResponse(currentTerm, grant);
     }
@@ -113,19 +141,18 @@ public final class RaftNode {
 
     // ---------------- Log Replication ----------------
 
-    /** Leader API: append a client command and replicate it. */
     public synchronized boolean replicate(String command) {
         if (state != RaftState.LEADER) return false;
 
         int index = log.size();
         log.add(new LogEntry(currentTerm, index, command));
+        persistLog();
 
-        int replicatedCount = 1; // leader has it
+        int replicatedCount = 1;
         for (int peer : peers) {
             if (sendAppendTo(peer)) replicatedCount++;
         }
 
-        // commit if a majority have it
         if (replicatedCount > (peers.length + 1) / 2) {
             commitIndex = index;
             return true;
@@ -151,25 +178,21 @@ public final class RaftNode {
         return resp.success();
     }
 
-    /** RPC handler: leader is sending entries (or a heartbeat). */
     public synchronized Messages.AppendResponse handleAppendEntries(Messages.AppendEntries rpc) {
         if (rpc.term() < currentTerm) {
             return new Messages.AppendResponse(currentTerm, false, -1);
         }
         if (rpc.term() > currentTerm) stepDown(rpc.term());
 
-        // valid leader for this term
         state = RaftState.FOLLOWER;
         currentLeader = rpc.leaderId();
 
-        // append entries (simplified: append the leader's latest entry if new)
+        boolean changed = false;
         for (LogEntry e : rpc.entries()) {
-            if (e.index() == log.size()) {
-                log.add(e);
-            } else if (e.index() < log.size()) {
-                log.set(e.index(), e); // overwrite (conflict resolution, simplified)
-            }
+            if (e.index() == log.size()) { log.add(e); changed = true; }
+            else if (e.index() < log.size()) { log.set(e.index(), e); changed = true; }
         }
+        if (changed) persistLog();
 
         if (rpc.leaderCommit() > commitIndex) {
             commitIndex = Math.min(rpc.leaderCommit(), log.size() - 1);
@@ -184,10 +207,10 @@ public final class RaftNode {
         state = RaftState.FOLLOWER;
         votedFor = null;
         currentLeader = null;
+        persistMeta();
     }
 
     public synchronized void receiveHeartbeatTick() {
-        // used by tests/cluster to drive heartbeats from the leader
         if (state == RaftState.LEADER) sendHeartbeats();
     }
 }

@@ -1,17 +1,22 @@
 package com.veritasdb;
 
+import com.veritasdb.raft.GrpcTransport;
+import com.veritasdb.raft.RaftCluster;
+import com.veritasdb.raft.RaftGrpcServer;
+import com.veritasdb.raft.RaftNode;
+import com.veritasdb.raft.RaftPersistence;
 import com.veritasdb.storage.LsmEngine;
 import com.veritasdb.txn.MvccStore;
 import com.veritasdb.txn.Transaction;
 import com.veritasdb.txn.TransactionManager;
-import com.veritasdb.raft.RaftCluster;
-import com.veritasdb.raft.RaftNode;
-import com.veritasdb.raft.GrpcTransport;
-import com.veritasdb.raft.RaftGrpcServer;
-import java.util.HashMap;
-import java.util.Map;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class Main {
     public static void main(String[] args) throws Exception {
@@ -19,17 +24,16 @@ public class Main {
             runTxnDemo();
             return;
         }
-
-         if (args.length >= 2 && args[0].equalsIgnoreCase("node")) {
-            runNode(args);
-            return;
-        }
-
         if (args.length >= 1 && args[0].equalsIgnoreCase("raft")) {
             runRaftDemo();
             return;
         }
+        if (args.length >= 2 && args[0].equalsIgnoreCase("node")) {
+            runNode(args);
+            return;
+        }
 
+        // Default: single-node LSM storage CLI
         Path dataDir = Path.of("data");
         try (LsmEngine engine = new LsmEngine(dataDir)) {
             System.out.println("Recovered: memtable=" + engine.memtableSize()
@@ -48,10 +52,12 @@ public class Main {
                 engine.compact();
                 System.out.println("Compacted into " + engine.ssTableCount() + " SSTable(s)");
             } else {
-                System.out.println("Usage: put <k> <v> | get <k> | del <k> | compact | txn");
+                System.out.println("Usage: put <k> <v> | get <k> | del <k> | compact | txn | raft | node ...");
             }
         }
     }
+
+    // ---------------- MVCC transaction demo ----------------
 
     private static void runTxnDemo() {
         TransactionManager tm = new TransactionManager(new MvccStore());
@@ -86,8 +92,10 @@ public class Main {
         System.out.println("t2 commit: " + (tm.commit(t2) ? "SUCCESS" : "ABORT (conflict)"));
     }
 
+    // ---------------- In-process Raft demo ----------------
+
     private static void runRaftDemo() {
-        com.veritasdb.raft.RaftCluster cluster = new com.veritasdb.raft.RaftCluster(3);
+        RaftCluster cluster = new RaftCluster(3);
         System.out.println("=== Raft Demo (3 nodes) ===\n");
 
         System.out.println("Node 0 starts an election...");
@@ -109,13 +117,15 @@ public class Main {
                 + " (term " + cluster.leader().currentTerm() + ")");
     }
 
+    // ---------------- Networked Raft node (gRPC) ----------------
+
     private static void runNode(String[] args) throws Exception {
         // Usage: node <id> <port> <peerId>:<host>:<port> [<peerId>:<host>:<port> ...]
         int id = Integer.parseInt(args[1]);
         int port = Integer.parseInt(args[2]);
 
         Map<Integer, String> addresses = new HashMap<>();
-        java.util.List<Integer> peerIds = new java.util.ArrayList<>();
+        List<Integer> peerIds = new ArrayList<>();
         for (int i = 3; i < args.length; i++) {
             String[] parts = args[i].split(":");
             int peerId = Integer.parseInt(parts[0]);
@@ -125,23 +135,27 @@ public class Main {
         int[] peers = peerIds.stream().mapToInt(Integer::intValue).toArray();
 
         GrpcTransport transport = new GrpcTransport(addresses);
-        RaftNode node = new RaftNode(id, peers, transport);
+        RaftPersistence persistence = new RaftPersistence(Path.of("raft-data"), id);
+        RaftNode node = new RaftNode(id, peers, transport, persistence);
         RaftGrpcServer server = new RaftGrpcServer(port, node);
         server.start();
 
-        // Simple control: type 'elect' to start an election, 'put k v' to replicate, 'status', 'quit'
-        java.io.BufferedReader in = new java.io.BufferedReader(
-                new java.io.InputStreamReader(System.in));
+        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
         System.out.println("Commands: elect | put <k> <v> | status | quit");
         String line;
         while ((line = in.readLine()) != null) {
             String[] c = line.trim().split(" ");
-            if (c.length == 0) continue;
+            if (c.length == 0 || c[0].isEmpty()) continue;
             switch (c[0].toLowerCase()) {
-                case "elect" -> { node.startElection();
-                    System.out.println("state=" + node.state() + " term=" + node.currentTerm()); }
-                case "put" -> { boolean ok = node.replicate("PUT " + c[1] + " " + c[2]);
-                    System.out.println("replicated=" + ok); }
+                case "elect" -> {
+                    node.startElection();
+                    System.out.println("state=" + node.state() + " term=" + node.currentTerm());
+                }
+                case "put" -> {
+                    if (c.length < 3) { System.out.println("usage: put <k> <v>"); break; }
+                    boolean ok = node.replicate("PUT " + c[1] + " " + c[2]);
+                    System.out.println("replicated=" + ok);
+                }
                 case "status" -> System.out.println("id=" + node.id() + " state=" + node.state()
                         + " term=" + node.currentTerm() + " leader=" + node.currentLeader()
                         + " log=" + node.logSize());

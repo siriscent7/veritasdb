@@ -6,3 +6,4 @@ build/
 data/*.db
 data/*.wal
 data/*.sst
+raft-data/
