@@ -6,6 +6,10 @@ import com.veritasdb.txn.Transaction;
 import com.veritasdb.txn.TransactionManager;
 import com.veritasdb.raft.RaftCluster;
 import com.veritasdb.raft.RaftNode;
+import com.veritasdb.raft.GrpcTransport;
+import com.veritasdb.raft.RaftGrpcServer;
+import java.util.HashMap;
+import java.util.Map;
 
 import java.nio.file.Path;
 
@@ -13,6 +17,11 @@ public class Main {
     public static void main(String[] args) throws Exception {
         if (args.length >= 1 && args[0].equalsIgnoreCase("txn")) {
             runTxnDemo();
+            return;
+        }
+
+         if (args.length >= 2 && args[0].equalsIgnoreCase("node")) {
+            runNode(args);
             return;
         }
 
@@ -98,5 +107,47 @@ public class Main {
         cluster.node(1).startElection();
         System.out.println("New leader is node " + cluster.leader().id()
                 + " (term " + cluster.leader().currentTerm() + ")");
+    }
+
+    private static void runNode(String[] args) throws Exception {
+        // Usage: node <id> <port> <peerId>:<host>:<port> [<peerId>:<host>:<port> ...]
+        int id = Integer.parseInt(args[1]);
+        int port = Integer.parseInt(args[2]);
+
+        Map<Integer, String> addresses = new HashMap<>();
+        java.util.List<Integer> peerIds = new java.util.ArrayList<>();
+        for (int i = 3; i < args.length; i++) {
+            String[] parts = args[i].split(":");
+            int peerId = Integer.parseInt(parts[0]);
+            addresses.put(peerId, parts[1] + ":" + parts[2]);
+            peerIds.add(peerId);
+        }
+        int[] peers = peerIds.stream().mapToInt(Integer::intValue).toArray();
+
+        GrpcTransport transport = new GrpcTransport(addresses);
+        RaftNode node = new RaftNode(id, peers, transport);
+        RaftGrpcServer server = new RaftGrpcServer(port, node);
+        server.start();
+
+        // Simple control: type 'elect' to start an election, 'put k v' to replicate, 'status', 'quit'
+        java.io.BufferedReader in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(System.in));
+        System.out.println("Commands: elect | put <k> <v> | status | quit");
+        String line;
+        while ((line = in.readLine()) != null) {
+            String[] c = line.trim().split(" ");
+            if (c.length == 0) continue;
+            switch (c[0].toLowerCase()) {
+                case "elect" -> { node.startElection();
+                    System.out.println("state=" + node.state() + " term=" + node.currentTerm()); }
+                case "put" -> { boolean ok = node.replicate("PUT " + c[1] + " " + c[2]);
+                    System.out.println("replicated=" + ok); }
+                case "status" -> System.out.println("id=" + node.id() + " state=" + node.state()
+                        + " term=" + node.currentTerm() + " leader=" + node.currentLeader()
+                        + " log=" + node.logSize());
+                case "quit" -> { server.stop(); return; }
+                default -> System.out.println("Unknown: " + line);
+            }
+        }
     }
 }

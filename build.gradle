@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'application'
+    id 'com.google.protobuf' version '0.9.4'
 }
 
 group = 'com.veritasdb'
@@ -12,9 +13,29 @@ java {
 
 repositories { mavenCentral() }
 
+def grpcVersion = '1.62.2'
+def protobufVersion = '3.25.3'
+
 dependencies {
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+    // needed for generated gRPC code on modern JDKs
+    compileOnly 'org.apache.tomcat:annotations-api:6.0.53'
+
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:${protobufVersion}" }
+    plugins {
+        grpc { artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}" }
+    }
+    generateProtoTasks {
+        all()*.plugins { grpc {} }
+    }
 }
 
 application {
